@@ -97,6 +97,7 @@ private:
     int votedFor = -1;
     int currentLeaderId = 1;
     bool active = true;
+    bool isIsolated = false;
 
     SOCKET sock = INVALID_SOCKET;
     std::thread listenerThread;
@@ -116,6 +117,7 @@ private:
     };
 
     void sendUdp(int targetPort, const std::string& data) {
+        if (isIsolated) return;
         std::string encrypted = encryptAES(data, AES_KEY, AES_IV);
         sockaddr_in destAddr;
         destAddr.sin_family = AF_INET;
@@ -125,6 +127,7 @@ private:
     }
 
     void broadcast(const std::string& data) {
+        if (isIsolated) return;
         for (auto const& [nodeId, nodePort] : clusterMap) {
             if (nodeId != id) {
                 sendUdp(nodePort, data);
@@ -154,7 +157,7 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             std::lock_guard<std::mutex> lock(stateMtx);
 
-            if (state == State::CRASHED) continue;
+            if (state == State::CRASHED || isIsolated) continue;
 
             if (state == State::LEADER) {
                 static auto lastHeartbeatSent = std::chrono::steady_clock::now();
@@ -217,6 +220,45 @@ private:
 
                 std::lock_guard<std::mutex> lock(stateMtx);
                 if (state == State::CRASHED) continue;
+
+                if (msg == "ISOLATE") {
+                    isIsolated = true;
+                    std::ostringstream oss;
+                    oss << "\n============================================\n"
+                        << "[Node " << id << " - " << getStateString() << "] NETWORK ISOLATED! Discarding all packets.\n"
+                        << "============================================";
+                    safePrint(oss.str());
+
+                    raft::TelemetryResponse resp;
+                    resp.set_success(true);
+                    std::string payload;
+                    resp.SerializeToString(&payload);
+                    std::string encryptedResp = encryptAES(payload, AES_KEY, AES_IV);
+                    sendto(sock, encryptedResp.c_str(), encryptedResp.length(), 0, (SOCKADDR*)&clientAddr, clientAddrLen);
+                    continue;
+                }
+
+                if (msg == "HEAL") {
+                    isIsolated = false;
+                    lastHeartbeatTime = std::chrono::steady_clock::now();
+                    std::ostringstream oss;
+                    oss << "\n============================================\n"
+                        << "[Node " << id << " - " << getStateString() << "] NETWORK HEALED! Resuming cluster communication.\n"
+                        << "============================================";
+                    safePrint(oss.str());
+
+                    raft::TelemetryResponse resp;
+                    resp.set_success(true);
+                    std::string payload;
+                    resp.SerializeToString(&payload);
+                    std::string encryptedResp = encryptAES(payload, AES_KEY, AES_IV);
+                    sendto(sock, encryptedResp.c_str(), encryptedResp.length(), 0, (SOCKADDR*)&clientAddr, clientAddrLen);
+                    continue;
+                }
+
+                if (isIsolated) {
+                    continue;
+                }
 
                 if (msg == "KILL") {
                     std::ostringstream oss;

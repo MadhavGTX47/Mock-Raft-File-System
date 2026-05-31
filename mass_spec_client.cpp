@@ -107,14 +107,27 @@ int main() {
 
     while(true) {
         std::cout << "\n[Target: " << currentLeader << "]\n";
-        std::cout << "Enter payload (or type 'KILL' to simulate leader crash, 'exit' to quit): ";
+        std::cout << "Enter payload (or type 'KILL' to simulate leader crash, 'ISOLATE <nodeId>'/'HEAL <nodeId>' to partition, 'exit' to quit): ";
         std::getline(std::cin, userInput);
 
         if (userInput == "exit") break;
         if (userInput.empty()) continue;
 
         std::string finalPayload;
-        if (userInput == "KILL") {
+        sockaddr_in targetAddr = serverAddr;
+
+        if (userInput.rfind("ISOLATE ", 0) == 0 || userInput.rfind("HEAL ", 0) == 0) {
+            size_t spacePos = userInput.find(" ");
+            std::string cmd = userInput.substr(0, spacePos);
+            int targetNodeId = std::stoi(userInput.substr(spacePos + 1));
+            int targetPort = 8080 + targetNodeId;
+
+            targetAddr.sin_port = htons(targetPort);
+            finalPayload = cmd;
+            
+            std::cout << "[Client] Sending " << cmd << " command to Node " << targetNodeId << " on Port " << targetPort << "...\n";
+        }
+        else if (userInput == "KILL") {
             finalPayload = "KILL";
         } else {
             std::string hash = calculateSHA256(userInput);
@@ -131,7 +144,7 @@ int main() {
 
         std::cout << "[Client] Transmitting over UDP (Secure AES-256-CBC Encrypted)...\n";
         std::string encryptedPayload = encryptAES(finalPayload, AES_KEY, AES_IV);
-        sendto(clientSocket, encryptedPayload.c_str(), encryptedPayload.length(), 0, (SOCKADDR*)&serverAddr, sizeof(serverAddr));
+        sendto(clientSocket, encryptedPayload.c_str(), encryptedPayload.length(), 0, (SOCKADDR*)&targetAddr, sizeof(targetAddr));
         
         char buffer[1024];          
         sockaddr_in fromAddr;       
@@ -147,6 +160,16 @@ int main() {
                 continue;
             }
             
+            if (userInput.rfind("ISOLATE ", 0) == 0 || userInput.rfind("HEAL ", 0) == 0) {
+                raft::TelemetryResponse response;
+                if (response.ParseFromString(reply) && response.success()) {
+                    std::cout << "[Client] Node network command acknowledged by target node.\n";
+                } else {
+                    std::cout << "[Client] Node network command failed.\n";
+                }
+                continue;
+            }
+
             raft::TelemetryResponse response;
             if (response.ParseFromString(reply)) {
                 if (!response.success() && !response.redirect_leader_ip().empty()) {
@@ -173,6 +196,11 @@ int main() {
                 std::cout << "[Client Alert] Failed to parse response payload!\n";
             }
         } else {
+            if (userInput.rfind("ISOLATE ", 0) == 0 || userInput.rfind("HEAL ", 0) == 0) {
+                std::cout << "[Client Alert] Target Node is unreachable or offline.\n";
+                continue;
+            }
+
             int currentPort = ntohs(serverAddr.sin_port);
             int nextNodeId = (currentPort - 8081 + 1) % 5 + 1;
             int nextPort = 8080 + nextNodeId;
