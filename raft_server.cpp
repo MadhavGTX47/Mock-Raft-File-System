@@ -14,7 +14,6 @@
 
 #include "raft.pb.h"
 
-// Thread-safe console printing
 std::mutex printMtx;
 void safePrint(const std::string& msg) {
     std::lock_guard<std::mutex> lock(printMtx);
@@ -30,7 +29,7 @@ private:
     State state = State::FOLLOWER;
     int currentTerm = 0;
     int votedFor = -1;
-    int currentLeaderId = 1; // Node 1 starts as Leader initially
+    int currentLeaderId = 1;
     bool active = true;
 
     SOCKET sock = INVALID_SOCKET;
@@ -42,7 +41,6 @@ private:
     int electionTimeoutMs;
     int votesGranted = 0;
 
-    // Mapping Node ID -> UDP Port
     std::map<int, int> clusterMap = {
         {1, 8081},
         {2, 8082},
@@ -51,7 +49,6 @@ private:
         {5, 8085}
     };
 
-    // Transmit message over UDP
     void sendUdp(int targetPort, const std::string& data) {
         sockaddr_in destAddr;
         destAddr.sin_family = AF_INET;
@@ -60,7 +57,6 @@ private:
         sendto(sock, data.c_str(), data.length(), 0, (SOCKADDR*)&destAddr, sizeof(destAddr));
     }
 
-    // Broadcast message to all peer nodes
     void broadcast(const std::string& data) {
         for (auto const& [nodeId, nodePort] : clusterMap) {
             if (nodeId != id) {
@@ -69,11 +65,10 @@ private:
         }
     }
 
-    // Generate a randomized election timeout value
     int getRandTimeout() {
         static std::random_device rd;
         static std::mt19937 gen(rd());
-        std::uniform_int_distribution<> distr(1500, 3000); // Range: 1.5s - 3.0s
+        std::uniform_int_distribution<> distr(1500, 3000);
         return distr(gen);
     }
 
@@ -87,7 +82,6 @@ private:
         return "UNKNOWN";
     }
 
-    // Heartbeat broadcasting (Leader) & Timeout monitoring (Follower/Candidate)
     void runTimerLoop() {
         while (active) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -96,7 +90,6 @@ private:
             if (state == State::CRASHED) continue;
 
             if (state == State::LEADER) {
-                // Broadcast heartbeat AppendEntries payload every 200ms
                 static auto lastHeartbeatSent = std::chrono::steady_clock::now();
                 auto now = std::chrono::steady_clock::now();
                 if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastHeartbeatSent).count() >= 200) {
@@ -115,7 +108,6 @@ private:
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastHeartbeatTime).count();
                 
                 if (elapsed >= electionTimeoutMs) {
-                    // Trigger new election cycle
                     state = State::CANDIDATE;
                     currentTerm++;
                     votedFor = id;
@@ -139,7 +131,6 @@ private:
         }
     }
 
-    // UDP Listener thread loop
     void runListenerLoop() {
         char buffer[1024];
         sockaddr_in clientAddr;
@@ -157,7 +148,6 @@ private:
                 std::lock_guard<std::mutex> lock(stateMtx);
                 if (state == State::CRASHED) continue;
 
-                // Handle simulated leader shutdown trigger
                 if (msg == "KILL") {
                     std::ostringstream oss;
                     oss << "\n============================================\n"
@@ -180,7 +170,6 @@ private:
                     continue;
                 }
 
-                // 1. Process AppendEntries Heartbeat (AREQ)
                 raft::AppendEntriesRequest appendReq;
                 if (appendReq.ParseFromString(msg)) {
                     if (appendReq.term() >= currentTerm) {
@@ -205,7 +194,6 @@ private:
                     continue;
                 }
 
-                // 2. Process VoteRequest (VREQ)
                 raft::VoteRequest voteReq;
                 if (voteReq.ParseFromString(msg)) {
                     raft::VoteResponse voteResp;
@@ -236,7 +224,6 @@ private:
                     continue;
                 }
 
-                // 3. Process VoteResponse (VRES)
                 raft::VoteResponse voteResp;
                 if (voteResp.ParseFromString(msg)) {
                     if (state == State::CANDIDATE && voteResp.term() == currentTerm && voteResp.vote_granted()) {
@@ -245,7 +232,7 @@ private:
                         oss << "[Node " << id << " - CANDIDATE] Got Vote! Current count: " << votesGranted << "/5";
                         safePrint(oss.str());
 
-                        if (votesGranted >= 3) { // Majority (3 out of 5)
+                        if (votesGranted >= 3) {
                             state = State::LEADER;
                             currentLeaderId = id;
                             std::ostringstream ossL;
@@ -258,7 +245,6 @@ private:
                     continue;
                 }
 
-                // 4. Process Client Telemetry Data (TREQ)
                 raft::TelemetryPayload clientPayload;
                 if (clientPayload.ParseFromString(msg)) {
                     raft::TelemetryResponse clientResp;
@@ -341,7 +327,6 @@ public:
 };
 
 int main(int argc, char* argv[]) {
-    // Isolated process execution
     if (argc > 1) {
         int nodeId = std::stoi(argv[1]);
         if (nodeId < 1 || nodeId > 5) {
@@ -356,7 +341,6 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // Unified process execution (5 virtual nodes running concurrently)
     std::cout << "=========================================================\n";
     std::cout << "Starting Local Raft Cluster Simulation (5 Concurrent Nodes)\n";
     std::cout << "=========================================================\n";

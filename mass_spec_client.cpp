@@ -11,7 +11,6 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-// Calculates the SHA-256 hash of a string using OpenSSL EVP API
 std::string calculateSHA256(const std::string& data) {
     if(data == "KILL") return "NONE";
     
@@ -34,7 +33,6 @@ std::string calculateSHA256(const std::string& data) {
 int main() {
     std::cout << "--- Mass Spectrometer Interactive Client ---\n";
     
-    // Initialize Windows Sockets
     WSADATA wsaData;
     int wsaResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (wsaResult != 0) {
@@ -42,7 +40,6 @@ int main() {
         return 1;
     }
     
-    // Create UDP Socket
     SOCKET clientSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (clientSocket == INVALID_SOCKET) {
         std::cerr << "Failed to create socket. Error: " << WSAGetLastError() << "\n";
@@ -50,14 +47,12 @@ int main() {
         return 1;
     }
     
-    // Set 2-second receive timeout to detect leader failures
     DWORD timeout = 2000;
     setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
 
-    // Configure server address
     sockaddr_in serverAddr;
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(8081); // Initial target: Node 1 (port 8081)
+    serverAddr.sin_port = htons(8081);
     inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
 
     std::string currentLeader = "Node 1 (127.0.0.1:8081)";
@@ -75,10 +70,8 @@ int main() {
         if (userInput == "KILL") {
             finalPayload = "KILL";
         } else {
-            // Compute data hash
             std::string hash = calculateSHA256(userInput);
             
-            // Populate protobuf telemetry payload
             raft::TelemetryPayload payload;
             payload.set_timestamp(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
@@ -104,7 +97,6 @@ int main() {
             
             raft::TelemetryResponse response;
             if (response.ParseFromString(reply)) {
-                // If contacted server is a Follower, redirect to current Leader
                 if (!response.success() && !response.redirect_leader_ip().empty()) {
                     std::cout << "\n[CLIENT ALERT] Connection Rejected! Server is no longer the leader.\n";
                     std::cout << "[CLIENT ALERT] Parsing redirect... Updating internal routing table.\n";
@@ -129,7 +121,6 @@ int main() {
                 std::cout << "[Client Alert] Failed to parse response payload!\n";
             }
         } else {
-            // Cycle to the next node in the cluster on timeout
             int currentPort = ntohs(serverAddr.sin_port);
             int nextNodeId = (currentPort - 8081 + 1) % 5 + 1;
             int nextPort = 8080 + nextNodeId;
