@@ -7,17 +7,83 @@
 #include <string>
 #include <sstream>
 #include <map>
+#include <iomanip>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <openssl/evp.h>
 
 #pragma comment(lib, "ws2_32.lib")
 
 #include "raft.pb.h"
 
+const std::string AES_KEY = "01234567890123456789012345678901";
+const std::string AES_IV  = "0123456789012345";
+
 std::mutex printMtx;
 void safePrint(const std::string& msg) {
     std::lock_guard<std::mutex> lock(printMtx);
     std::cout << msg << std::endl;
+}
+
+std::string calculateSHA256(const std::string& data) {
+    unsigned char hash[EVP_MAX_MD_SIZE]; 
+    unsigned int length = 0;
+    
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+    EVP_DigestUpdate(ctx, data.c_str(), data.size());
+    EVP_DigestFinal_ex(ctx, hash, &length);
+    EVP_MD_CTX_free(ctx);
+
+    std::ostringstream oss;
+    for (unsigned int i = 0; i < length; ++i) {
+        oss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
+    }
+    return oss.str();
+}
+
+std::string encryptAES(const std::string& plaintext, const std::string& key, const std::string& iv) {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, (const unsigned char*)key.c_str(), (const unsigned char*)iv.c_str());
+    
+    std::string ciphertext;
+    ciphertext.resize(plaintext.size() + EVP_CIPHER_block_size(EVP_aes_256_cbc()));
+    
+    int len = 0;
+    EVP_EncryptUpdate(ctx, (unsigned char*)&ciphertext[0], &len, (const unsigned char*)plaintext.c_str(), plaintext.size());
+    int ciphertext_len = len;
+    
+    EVP_EncryptFinal_ex(ctx, (unsigned char*)&ciphertext[0] + len, &len);
+    ciphertext_len += len;
+    
+    ciphertext.resize(ciphertext_len);
+    EVP_CIPHER_CTX_free(ctx);
+    
+    return ciphertext;
+}
+
+std::string decryptAES(const std::string& ciphertext, const std::string& key, const std::string& iv) {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, (const unsigned char*)key.c_str(), (const unsigned char*)iv.c_str());
+    
+    std::string plaintext;
+    plaintext.resize(ciphertext.size());
+    
+    int len = 0;
+    EVP_DecryptUpdate(ctx, (unsigned char*)&plaintext[0], &len, (const unsigned char*)ciphertext.c_str(), ciphertext.size());
+    int plaintext_len = len;
+    
+    int ret = EVP_DecryptFinal_ex(ctx, (unsigned char*)&plaintext[0] + len, &len);
+    if (ret <= 0) {
+        EVP_CIPHER_CTX_free(ctx);
+        return "";
+    }
+    plaintext_len += len;
+    
+    plaintext.resize(plaintext_len);
+    EVP_CIPHER_CTX_free(ctx);
+    
+    return plaintext;
 }
 
 enum class State { FOLLOWER, CANDIDATE, LEADER, CRASHED };
@@ -50,11 +116,12 @@ private:
     };
 
     void sendUdp(int targetPort, const std::string& data) {
+        std::string encrypted = encryptAES(data, AES_KEY, AES_IV);
         sockaddr_in destAddr;
         destAddr.sin_family = AF_INET;
         destAddr.sin_port = htons(targetPort);
         inet_pton(AF_INET, "127.0.0.1", &destAddr.sin_addr);
-        sendto(sock, data.c_str(), data.length(), 0, (SOCKADDR*)&destAddr, sizeof(destAddr));
+        sendto(sock, encrypted.c_str(), encrypted.length(), 0, (SOCKADDR*)&destAddr, sizeof(destAddr));
     }
 
     void broadcast(const std::string& data) {
@@ -142,8 +209,11 @@ private:
 
             int bytes = recvfrom(sock, buffer, sizeof(buffer) - 1, 0, (SOCKADDR*)&clientAddr, &clientAddrLen);
             if (bytes > 0) {
-                buffer[bytes] = '\0';
-                std::string msg(buffer);
+                std::string encryptedMsg(buffer, bytes);
+                std::string msg = decryptAES(encryptedMsg, AES_KEY, AES_IV);
+                if (msg.empty()) {
+                    continue;
+                }
 
                 std::lock_guard<std::mutex> lock(stateMtx);
                 if (state == State::CRASHED) continue;
@@ -162,7 +232,8 @@ private:
                     resp.set_error_message("SERVER_CRASHED");
                     std::string payload;
                     resp.SerializeToString(&payload);
-                    sendto(sock, payload.c_str(), payload.length(), 0, (SOCKADDR*)&clientAddr, clientAddrLen);
+                    std::string encryptedResp = encryptAES(payload, AES_KEY, AES_IV);
+                    sendto(sock, encryptedResp.c_str(), encryptedResp.length(), 0, (SOCKADDR*)&clientAddr, clientAddrLen);
                     
                     closesocket(sock);
                     sock = INVALID_SOCKET;
@@ -250,16 +321,25 @@ private:
                     raft::TelemetryResponse clientResp;
 
                     if (state == State::LEADER) {
+                        std::string expectedHash = calculateSHA256(clientPayload.data_payload());
+                        bool integrityMatch = (expectedHash == clientPayload.sha256_hash());
+
                         std::ostringstream oss;
                         oss << "\n--------------------------------------------\n"
-                            << "[Node " << id << " - LEADER] CLIENT TELEMETRY COMMITTED:\n"
+                            << "[Node " << id << " - LEADER] CLIENT TELEMETRY RECEIVED:\n"
                             << "  Timestamp: " << clientPayload.timestamp() << " us\n"
                             << "  Data     : " << clientPayload.data_payload() << "\n"
-                            << "  Integrity: SHA-256 Match (" << clientPayload.sha256_hash() << ")\n"
+                            << "  Integrity: SHA-256 " << (integrityMatch ? "MATCH" : "MISMATCH") 
+                            << " (" << clientPayload.sha256_hash() << ")\n"
                             << "--------------------------------------------";
                         safePrint(oss.str());
 
-                        clientResp.set_success(true);
+                        if (integrityMatch) {
+                            clientResp.set_success(true);
+                        } else {
+                            clientResp.set_success(false);
+                            clientResp.set_error_message("INTEGRITY_CHECK_FAILED");
+                        }
                     } else {
                         clientResp.set_success(false);
                         clientResp.set_redirect_leader_ip(std::to_string(currentLeaderId));
@@ -267,7 +347,8 @@ private:
 
                     std::string payload;
                     clientResp.SerializeToString(&payload);
-                    sendto(sock, payload.c_str(), payload.length(), 0, (SOCKADDR*)&clientAddr, clientAddrLen);
+                    std::string encryptedResp = encryptAES(payload, AES_KEY, AES_IV);
+                    sendto(sock, encryptedResp.c_str(), encryptedResp.length(), 0, (SOCKADDR*)&clientAddr, clientAddrLen);
                     continue;
                 }
             }

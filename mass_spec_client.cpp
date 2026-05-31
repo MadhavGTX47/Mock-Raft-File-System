@@ -11,6 +11,9 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
+const std::string AES_KEY = "01234567890123456789012345678901";
+const std::string AES_IV  = "0123456789012345";
+
 std::string calculateSHA256(const std::string& data) {
     if(data == "KILL") return "NONE";
     
@@ -28,6 +31,50 @@ std::string calculateSHA256(const std::string& data) {
         oss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
     }
     return oss.str();
+}
+
+std::string encryptAES(const std::string& plaintext, const std::string& key, const std::string& iv) {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, (const unsigned char*)key.c_str(), (const unsigned char*)iv.c_str());
+    
+    std::string ciphertext;
+    ciphertext.resize(plaintext.size() + EVP_CIPHER_block_size(EVP_aes_256_cbc()));
+    
+    int len = 0;
+    EVP_EncryptUpdate(ctx, (unsigned char*)&ciphertext[0], &len, (const unsigned char*)plaintext.c_str(), plaintext.size());
+    int ciphertext_len = len;
+    
+    EVP_EncryptFinal_ex(ctx, (unsigned char*)&ciphertext[0] + len, &len);
+    ciphertext_len += len;
+    
+    ciphertext.resize(ciphertext_len);
+    EVP_CIPHER_CTX_free(ctx);
+    
+    return ciphertext;
+}
+
+std::string decryptAES(const std::string& ciphertext, const std::string& key, const std::string& iv) {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, (const unsigned char*)key.c_str(), (const unsigned char*)iv.c_str());
+    
+    std::string plaintext;
+    plaintext.resize(ciphertext.size());
+    
+    int len = 0;
+    EVP_DecryptUpdate(ctx, (unsigned char*)&plaintext[0], &len, (const unsigned char*)ciphertext.c_str(), ciphertext.size());
+    int plaintext_len = len;
+    
+    int ret = EVP_DecryptFinal_ex(ctx, (unsigned char*)&plaintext[0] + len, &len);
+    if (ret <= 0) {
+        EVP_CIPHER_CTX_free(ctx);
+        return "";
+    }
+    plaintext_len += len;
+    
+    plaintext.resize(plaintext_len);
+    EVP_CIPHER_CTX_free(ctx);
+    
+    return plaintext;
 }
 
 int main() {
@@ -82,8 +129,9 @@ int main() {
             std::cout << "[Client] Serialized Protobuf size: " << finalPayload.size() << " bytes\n";
         }
 
-        std::cout << "[Client] Transmitting over UDP (Simulated gRPC Transport)...\n";
-        sendto(clientSocket, finalPayload.c_str(), finalPayload.length(), 0, (SOCKADDR*)&serverAddr, sizeof(serverAddr));
+        std::cout << "[Client] Transmitting over UDP (Secure AES-256-CBC Encrypted)...\n";
+        std::string encryptedPayload = encryptAES(finalPayload, AES_KEY, AES_IV);
+        sendto(clientSocket, encryptedPayload.c_str(), encryptedPayload.length(), 0, (SOCKADDR*)&serverAddr, sizeof(serverAddr));
         
         char buffer[1024];          
         sockaddr_in fromAddr;       
@@ -92,8 +140,12 @@ int main() {
         int bytesReceived = recvfrom(clientSocket, buffer, sizeof(buffer) - 1, 0, (SOCKADDR*)&fromAddr, &fromLen);
 
         if (bytesReceived > 0) {
-            buffer[bytesReceived] = '\0';
-            std::string reply(buffer);
+            std::string encryptedReply(buffer, bytesReceived);
+            std::string reply = decryptAES(encryptedReply, AES_KEY, AES_IV);
+            if (reply.empty()) {
+                std::cout << "[Client Alert] Decryption failed or payload corrupted!\n";
+                continue;
+            }
             
             raft::TelemetryResponse response;
             if (response.ParseFromString(reply)) {
@@ -115,7 +167,7 @@ int main() {
                     std::cout << "[Client] Kill command sent. The Server cluster is currently panicking and re-electing...\n";
                 }
                 else if (response.success()) {
-                    std::cout << "[Client] Server Response: HTTP 200 OK (Cluster Committed)\n";
+                    std::cout << "[Client] Server Response: HTTP 200 OK (Cluster Committed & Verified)\n";
                 }
             } else {
                 std::cout << "[Client Alert] Failed to parse response payload!\n";
