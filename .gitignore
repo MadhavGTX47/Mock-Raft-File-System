@@ -1,0 +1,16 @@
+# Compiled Binaries
+*.exe
+*.o
+*.obj
+*.out
+
+# Developer environment configurations
+.vscode/
+.vs/
+*.user
+*.suo
+*.db
+
+# Build artifacts
+build/
+bin/
